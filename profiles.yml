@@ -1,0 +1,7 @@
+mini_mart:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: mini_mart.duckdb
+      threads: 4

@@ -1,0 +1,25 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Olist 공개 CSV를 DuckDB raw 스키마로 적재한 원천 데이터
+    schema: raw
+    tables:
+      - name: olist_orders
+        columns:
+          - name: order_id
+            tests:
+              - unique
+              - not_null
+      - name: olist_order_items
+      - name: olist_order_payments
+      - name: olist_order_reviews
+      - name: olist_customers
+        columns:
+          - name: customer_id
+            tests:
+              - unique
+              - not_null
+      - name: olist_products
+      - name: olist_sellers
+      - name: product_category_name_translation

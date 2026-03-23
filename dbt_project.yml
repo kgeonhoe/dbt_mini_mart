@@ -1,0 +1,25 @@
+name: mini_mart
+version: 1.0.0
+config-version: 2
+
+profile: mini_mart
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+snapshot-paths: ["snapshots"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  mini_mart:
+    staging:
+      +materialized: view
+      +schema: stg
+    intermediate:
+      +materialized: view
+      +schema: int
+    gold:
+      +materialized: table
+      +schema: gold

@@ -1,0 +1,91 @@
+version: 2
+
+models:
+  - name: dim_customer
+    description: Olist 고객 차원 테이블
+    columns:
+      - name: customer_id
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_product
+    description: Olist 상품 차원 테이블
+    columns:
+      - name: product_id
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_seller
+    description: Olist 판매자 차원 테이블
+    columns:
+      - name: seller_id
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_payment_type
+    description: 결제수단 차원 테이블
+    columns:
+      - name: payment_type
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_date
+    description: 날짜 차원 테이블
+    columns:
+      - name: date_key
+        tests:
+          - unique
+          - not_null
+
+  - name: fct_orders
+    description: Olist 주문 아이템 기준 팩트 테이블
+    columns:
+      - name: order_line_id
+        tests:
+          - unique
+          - not_null
+      - name: order_id
+        tests:
+          - not_null
+      - name: customer_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_id
+      - name: product_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_product')
+                field: product_id
+      - name: seller_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_seller')
+                field: seller_id
+      - name: payment_type
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_payment_type')
+                field: payment_type
+      - name: date_key
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+
+  - name: fct_daily_sales
+    description: 날짜/판매자 기준 일일 매출 집계 팩트
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - date_key
+            - seller_id
