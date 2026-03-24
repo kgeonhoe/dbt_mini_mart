@@ -5,7 +5,7 @@ lines as (
     select * from {{ source('raw', 'olist_order_items') }}
 )
 select
-    concat(l.order_id, '-', cast(l.order_item_id as varchar)) as order_line_id,
+    {{ generate_order_line_id('l.order_id', 'l.order_item_id') }} as order_line_id,
     o.order_id,
     o.customer_id,
     l.seller_id,

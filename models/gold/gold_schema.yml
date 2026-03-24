@@ -2,88 +2,210 @@ version: 2
 
 models:
   - name: dim_customer
-    description: Olist 고객 차원 테이블
+    description: >
+      Olist 고객 차원 테이블. Grain: customer_id 1행.
+      customer_unique_id로 동일 고객의 반복 주문을 추적할 수 있습니다.
     columns:
       - name: customer_id
+        description: 고객 PK (주문별 고유)
         tests:
           - unique
           - not_null
+      - name: customer_unique_id
+        description: 고객 고유 식별자 (재구매 추적)
+        tests:
+          - not_null
+      - name: customer_zip_code_prefix
+        description: 고객 우편번호 앞자리
+      - name: customer_city
+        description: 고객 도시
+      - name: customer_state
+        description: 고객 주(州) 코드
 
   - name: dim_product
-    description: Olist 상품 차원 테이블
+    description: >
+      Olist 상품 차원 테이블. Grain: product_id 1행.
+      영문 카테고리명과 물리 속성(무게, 크기)을 포함합니다.
     columns:
       - name: product_id
+        description: 상품 PK
         tests:
           - unique
           - not_null
+      - name: product_category_name
+        description: 포르투갈어 카테고리명
+      - name: product_category_name_english
+        description: 영문 카테고리명
+      - name: product_weight_g
+        description: 상품 무게 (g)
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: true
+      - name: product_length_cm
+        description: 상품 길이 (cm)
+      - name: product_height_cm
+        description: 상품 높이 (cm)
+      - name: product_width_cm
+        description: 상품 너비 (cm)
 
   - name: dim_seller
-    description: Olist 판매자 차원 테이블
+    description: >
+      Olist 판매자 차원 테이블. Grain: seller_id 1행.
+      판매자 위치 정보(도시, 주)를 포함합니다.
     columns:
       - name: seller_id
+        description: 판매자 PK
         tests:
           - unique
           - not_null
+      - name: seller_zip_code_prefix
+        description: 판매자 우편번호 앞자리
+      - name: seller_city
+        description: 판매자 도시
+      - name: seller_state
+        description: 판매자 주(州) 코드
 
   - name: dim_payment_type
-    description: 결제수단 차원 테이블
+    description: >
+      결제수단 차원 테이블. stg_payments에서 distinct 추출.
+      Grain: payment_type 1행.
     columns:
       - name: payment_type
+        description: "결제 수단 코드 (credit_card, boleto, voucher, debit_card, not_defined)"
         tests:
           - unique
           - not_null
+      - name: payment_type_label
+        description: 언더스코어를 공백으로 치환한 결제수단 라벨
 
   - name: dim_date
-    description: 날짜 차원 테이블
+    description: >
+      날짜 차원 테이블 (2016-01-01 ~ 2018-12-31).
+      dbt_utils.date_spine으로 생성. Grain: date_key 1행.
     columns:
       - name: date_key
+        description: 날짜 PK (date 타입)
         tests:
           - unique
           - not_null
+      - name: year_num
+        description: 연도 (정수)
+      - name: month_num
+        description: 월 (1~12)
+      - name: day_num
+        description: 일 (1~31)
+      - name: year_month
+        description: "YYYY-MM 형식 문자열"
+      - name: is_weekend
+        description: 주말 여부 (토·일 = true)
 
   - name: fct_orders
-    description: Olist 주문 아이템 기준 팩트 테이블
+    description: >
+      주문 아이템(order line) 기준 팩트 테이블 — 스타스키마 중심.
+      Grain: order_line_id 1행. 5개 차원(customer, product, seller, payment_type, date)에 FK를 가집니다.
     columns:
       - name: order_line_id
+        description: "주문 라인 PK (order_id-item_id)"
         tests:
           - unique
           - not_null
       - name: order_id
+        description: 주문 ID
         tests:
           - not_null
       - name: customer_id
+        description: 고객 FK
         tests:
+          - not_null
           - relationships:
-              arguments:
-                to: ref('dim_customer')
-                field: customer_id
+              to: ref('dim_customer')
+              field: customer_id
       - name: product_id
+        description: 상품 FK
         tests:
+          - not_null
           - relationships:
-              arguments:
-                to: ref('dim_product')
-                field: product_id
+              to: ref('dim_product')
+              field: product_id
       - name: seller_id
+        description: 판매자 FK
         tests:
+          - not_null
           - relationships:
-              arguments:
-                to: ref('dim_seller')
-                field: seller_id
+              to: ref('dim_seller')
+              field: seller_id
       - name: payment_type
+        description: 주결제수단 FK
         tests:
+          - not_null
           - relationships:
-              arguments:
-                to: ref('dim_payment_type')
-                field: payment_type
+              to: ref('dim_payment_type')
+              field: payment_type
       - name: date_key
+        description: 주문 날짜 FK
         tests:
+          - not_null
           - relationships:
-              arguments:
-                to: ref('dim_date')
-                field: date_key
+              to: ref('dim_date')
+              field: date_key
+      - name: item_price
+        description: 아이템 단가
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: true
+      - name: freight_value
+        description: 배송비
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: true
+      - name: gross_item_amount
+        description: "아이템 총액 (단가 + 배송비)"
+        tests:
+          - not_null
+      - name: order_status
+        description: "주문 상태 (delivered, shipped 등)"
+      - name: order_item_id
+        description: 주문 내 아이템 순번
+      - name: order_item_count
+        description: 해당 주문의 총 아이템 수
+      - name: payment_total_value
+        description: 주문 전체 결제 합계
+      - name: avg_review_score
+        description: 주문 평균 리뷰 점수 (null 가능)
 
   - name: fct_daily_sales
-    description: 날짜/판매자 기준 일일 매출 집계 팩트
+    description: >
+      날짜/판매자 기준 일일 매출 집계 팩트.
+      Grain: date_key + seller_id 복합키.
+      fct_orders를 날짜·판매자 단위로 집계합니다.
+    columns:
+      - name: date_key
+        description: 집계 날짜 (dim_date FK)
+        tests:
+          - not_null
+      - name: seller_id
+        description: 판매자 ID (dim_seller FK)
+        tests:
+          - not_null
+      - name: order_count
+        description: 해당 날짜·판매자의 고유 주문 수
+      - name: line_count
+        description: 주문 아이템(라인) 수
+      - name: item_sales
+        description: 아이템 단가 합계
+      - name: freight_sales
+        description: 배송비 합계
+      - name: gross_sales
+        description: "총 매출액 (item_sales + freight_sales)"
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: true
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns:

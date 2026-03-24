@@ -1,0 +1,42 @@
+version: 2
+
+models:
+  - name: int_orders_enriched
+    description: >
+      주문 아이템에 결제·리뷰·아이템 수를 결합한 중간 모델.
+      Grain: order_line_id (주문 아이템 1행).
+      결제수단은 금액 기준 최상위 1개(primary_payment_type)를 선정하며,
+      리뷰 점수는 주문 단위 평균(avg_review_score)을 부여합니다.
+    columns:
+      - name: order_line_id
+        description: "주문 라인 PK (order_id || '-' || order_item_id)"
+      - name: order_id
+        description: 주문 ID
+      - name: customer_id
+        description: 고객 ID
+      - name: seller_id
+        description: 판매자 ID
+      - name: order_purchase_ts
+        description: 주문 생성 타임스탬프
+      - name: order_date
+        description: 주문 날짜 (date)
+      - name: order_status
+        description: "주문 상태 (delivered, shipped 등)"
+      - name: product_id
+        description: 상품 ID
+      - name: order_item_id
+        description: 주문 내 아이템 순번
+      - name: item_price
+        description: 아이템 단가
+      - name: freight_value
+        description: 아이템별 배송비
+      - name: gross_item_amount
+        description: "아이템 총액 (item_price + freight_value)"
+      - name: order_item_count
+        description: 해당 주문의 총 아이템 수
+      - name: payment_total_value
+        description: "주문 전체 결제 합계 (coalesce 0)"
+      - name: primary_payment_type
+        description: "금액 기준 최상위 결제수단 (coalesce 'unknown')"
+      - name: avg_review_score
+        description: 주문 평균 리뷰 점수 (null 가능)

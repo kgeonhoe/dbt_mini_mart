@@ -2,24 +2,107 @@ version: 2
 
 sources:
   - name: raw
-    description: Olist 공개 CSV를 DuckDB raw 스키마로 적재한 원천 데이터
+    description: >
+      Olist 공개 CSV를 DuckDB raw 스키마로 적재한 원천 데이터.
+      scripts/load_raw_to_duckdb.py 로 data/raw/*.csv → DuckDB raw 스키마에 벌크 로드됩니다.
     schema: raw
     tables:
       - name: olist_orders
+        description: 주문 헤더 — 주문 1건당 1행. 주문 상태, 일시 등 포함.
         columns:
           - name: order_id
+            description: 주문 고유 ID (PK)
             tests:
               - unique
               - not_null
+          - name: customer_id
+            description: 주문한 고객 ID (olist_customers FK)
+          - name: order_status
+            description: "주문 상태 (delivered, shipped, canceled 등)"
+          - name: order_purchase_timestamp
+            description: 주문 생성 일시
+
       - name: olist_order_items
+        description: 주문 아이템 — 주문 1건에 여러 아이템이 가능하며, order_id + order_item_id가 복합 PK.
+        columns:
+          - name: order_id
+            description: 주문 ID (olist_orders FK)
+          - name: order_item_id
+            description: 주문 내 아이템 순번
+          - name: product_id
+            description: 상품 ID (olist_products FK)
+          - name: seller_id
+            description: 판매자 ID (olist_sellers FK)
+          - name: price
+            description: 아이템 단가
+          - name: freight_value
+            description: 아이템별 배송비
+
       - name: olist_order_payments
+        description: 주문별 결제 내역 — 한 주문에 복수 결제수단 가능.
+        columns:
+          - name: order_id
+            description: 주문 ID (olist_orders FK)
+          - name: payment_sequential
+            description: 결제 순번
+          - name: payment_type
+            description: "결제 수단 (credit_card, boleto, voucher, debit_card)"
+          - name: payment_installments
+            description: 할부 개월 수
+          - name: payment_value
+            description: 결제 금액
+
       - name: olist_order_reviews
+        description: 주문 리뷰 — 배송 완료 후 고객이 남긴 평점·코멘트.
+        columns:
+          - name: review_id
+            description: 리뷰 고유 ID
+          - name: order_id
+            description: 주문 ID (olist_orders FK)
+          - name: review_score
+            description: "리뷰 점수 (1~5)"
+          - name: review_creation_date
+            description: 리뷰 작성 일자
+
       - name: olist_customers
+        description: 고객 마스터 — customer_id(주문별)와 customer_unique_id(실제 고객) 두 키 보유.
         columns:
           - name: customer_id
+            description: 고객 PK (주문별 고유)
             tests:
               - unique
               - not_null
+          - name: customer_unique_id
+            description: 실제 고객 식별자 (재구매 추적)
+          - name: customer_city
+            description: 고객 도시
+          - name: customer_state
+            description: 고객 주(州) 코드
+
       - name: olist_products
+        description: 상품 마스터 — 카테고리, 무게, 크기 등 상품 속성.
+        columns:
+          - name: product_id
+            description: 상품 PK
+          - name: product_category_name
+            description: 포르투갈어 카테고리명
+          - name: product_weight_g
+            description: 상품 무게 (g)
+
       - name: olist_sellers
+        description: 판매자 마스터 — 판매자 위치 정보 포함.
+        columns:
+          - name: seller_id
+            description: 판매자 PK
+          - name: seller_city
+            description: 판매자 도시
+          - name: seller_state
+            description: 판매자 주(州) 코드
+
       - name: product_category_name_translation
+        description: 포르투갈어 → 영문 카테고리명 매핑 테이블.
+        columns:
+          - name: product_category_name
+            description: 포르투갈어 카테고리명 (PK)
+          - name: product_category_name_english
+            description: 영문 카테고리명

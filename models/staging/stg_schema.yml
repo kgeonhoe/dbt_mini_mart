@@ -1,0 +1,157 @@
+version: 2
+
+models:
+  - name: stg_orders
+    description: >
+      주문-아이템 조인 후 기본 타입 캐스팅한 스테이징 모델.
+      Grain: 주문 아이템 1행 (order_id + order_item_id).
+    columns:
+      - name: order_line_id
+        description: "주문 라인 PK (order_id || '-' || order_item_id)"
+        tests:
+          - unique
+          - not_null
+      - name: order_id
+        description: 주문 ID (olist_orders FK)
+        tests:
+          - not_null
+      - name: customer_id
+        description: 고객 ID (olist_customers FK)
+        tests:
+          - not_null
+      - name: seller_id
+        description: 판매자 ID
+      - name: order_purchase_ts
+        description: 주문 생성 타임스탬프
+      - name: order_date
+        description: 주문 날짜 (date 캐스팅)
+        tests:
+          - not_null
+      - name: order_status
+        description: "주문 상태 (delivered, shipped 등)"
+      - name: product_id
+        description: 상품 ID
+      - name: order_item_id
+        description: 주문 내 아이템 순번
+      - name: item_price
+        description: 아이템 단가
+      - name: freight_value
+        description: 아이템별 배송비
+      - name: gross_item_amount
+        description: "아이템 총액 (item_price + freight_value)"
+
+  - name: stg_customers
+    description: "고객 마스터 스테이징 모델. Grain: customer_id 1행."
+    columns:
+      - name: customer_id
+        description: 고객 PK (주문별 고유)
+        tests:
+          - unique
+          - not_null
+      - name: customer_unique_id
+        description: 고객 고유 식별자 (재구매 추적용)
+        tests:
+          - not_null
+      - name: customer_zip_code_prefix
+        description: 고객 우편번호 앞자리
+      - name: customer_city
+        description: 고객 도시
+      - name: customer_state
+        description: 고객 주(州) 코드
+
+  - name: stg_products
+    description: >
+      상품 마스터 + 영문 카테고리 조인 스테이징 모델.
+      Grain: product_id 1행.
+    columns:
+      - name: product_id
+        description: 상품 PK
+        tests:
+          - unique
+          - not_null
+      - name: product_category_name
+        description: 포르투갈어 카테고리명
+      - name: product_category_name_english
+        description: 영문 카테고리명 (번역 테이블 left join)
+      - name: product_name_length
+        description: 상품명 글자 수
+      - name: product_description_length
+        description: 상품 설명 글자 수
+      - name: product_photos_qty
+        description: 상품 사진 수
+      - name: product_weight_g
+        description: 상품 무게 (g)
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: true
+      - name: product_length_cm
+        description: 상품 길이 (cm)
+      - name: product_height_cm
+        description: 상품 높이 (cm)
+      - name: product_width_cm
+        description: 상품 너비 (cm)
+
+  - name: stg_sellers
+    description: "판매자 마스터 스테이징 모델. Grain: seller_id 1행."
+    columns:
+      - name: seller_id
+        description: 판매자 PK
+        tests:
+          - unique
+          - not_null
+      - name: seller_zip_code_prefix
+        description: 판매자 우편번호 앞자리
+      - name: seller_city
+        description: 판매자 도시
+      - name: seller_state
+        description: 판매자 주(州) 코드
+
+  - name: stg_payments
+    description: "주문별 결제 내역 스테이징 모델. Grain: order_id + payment_sequential."
+    columns:
+      - name: order_id
+        description: 주문 ID (olist_orders FK)
+        tests:
+          - not_null
+      - name: payment_sequential
+        description: 결제 순번
+      - name: payment_type
+        description: "결제 수단 (credit_card, boleto, voucher, debit_card)"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['credit_card', 'boleto', 'voucher', 'debit_card', 'not_defined']
+      - name: payment_installments
+        description: 할부 개월 수
+      - name: payment_value
+        description: 결제 금액
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: true
+
+  - name: stg_reviews
+    description: "주문 리뷰 스테이징 모델. Grain: review_id."
+    columns:
+      - name: review_id
+        description: 리뷰 PK
+        tests:
+          - not_null
+      - name: order_id
+        description: 주문 ID (olist_orders FK)
+        tests:
+          - not_null
+      - name: review_score
+        description: "리뷰 점수 (1~5)"
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 1
+              max_value: 5
+              inclusive: true
+      - name: review_creation_date
+        description: 리뷰 작성 일자
+      - name: review_answer_ts
+        description: 리뷰 응답(게시) 타임스탬프

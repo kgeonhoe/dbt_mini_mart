@@ -4,20 +4,20 @@ with base as (
 payment_by_order as (
     select
         order_id,
-        sum(cast(payment_value as double)) as payment_total_value
-    from {{ source('raw', 'olist_order_payments') }}
+        sum(payment_value) as payment_total_value
+    from {{ ref('stg_payments') }}
     group by 1
 ),
 payment_type_ranked as (
     select
         order_id,
         payment_type,
-        sum(cast(payment_value as double)) as payment_type_value,
+        sum(payment_value) as payment_type_value,
         row_number() over (
             partition by order_id
-            order by sum(cast(payment_value as double)) desc, payment_type
+            order by sum(payment_value) desc, payment_type
         ) as rn
-    from {{ source('raw', 'olist_order_payments') }}
+    from {{ ref('stg_payments') }}
     group by 1, 2
 ),
 primary_payment_type as (
@@ -33,7 +33,7 @@ review_by_order as (
     select
         order_id,
         avg(cast(review_score as double)) as avg_review_score
-    from {{ source('raw', 'olist_order_reviews') }}
+    from {{ ref('stg_reviews') }}
     group by 1
 ),
 item_count as (
