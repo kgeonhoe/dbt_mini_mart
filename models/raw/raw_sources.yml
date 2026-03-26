@@ -5,7 +5,12 @@ sources:
     description: >
       Olist 공개 CSV를 DuckDB raw 스키마로 적재한 원천 데이터.
       scripts/load_raw_to_duckdb.py 로 data/raw/*.csv → DuckDB raw 스키마에 벌크 로드됩니다.
+      적재 시 _loaded_at 컬럼(current_timestamp)이 자동 추가되어 source freshness 추적에 사용됩니다.
     schema: raw
+    freshness:
+      warn_after: {count: 24, period: hour}
+      error_after: {count: 72, period: hour}
+    loaded_at_field: _loaded_at
     tables:
       - name: olist_orders
         description: 주문 헤더 — 주문 1건당 1행. 주문 상태, 일시 등 포함.

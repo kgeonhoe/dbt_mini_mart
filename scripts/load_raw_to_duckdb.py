@@ -74,7 +74,8 @@ def main() -> None:
         con.execute(
             f"""
             create or replace table raw.{table} as
-            select * from read_csv_auto(?, header=true)
+            select *, current_timestamp as _loaded_at
+            from read_csv_auto(?, header=true)
             """,
             [str(csv_path)],
         )

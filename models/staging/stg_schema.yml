@@ -3,7 +3,19 @@ version: 2
 models:
   - name: stg_orders
     description: >
-      주문-아이템 조인 후 기본 타입 캐스팅한 스테이징 모델.
+      **Raw → Stg 변환 근거**
+
+      Raw에는 주문 헤더(olist_orders)와 주문 아이템(olist_order_items)이 별도 테이블로 존재합니다.
+      이 프로젝트의 분석 grain은 '주문 아이템(order line)'이므로, staging 단계에서
+      두 테이블을 inner join하여 하나의 주문 아이템 행을 만듭니다.
+
+      변환 내용:
+      1) olist_orders + olist_order_items를 order_id로 조인 → 1행 = 1 주문 아이템
+      2) order_id + order_item_id를 concat하여 대리키(order_line_id) 생성 (generate_order_line_id 매크로)
+      3) timestamp → date 캐스팅(order_date), 금액 컬럼 double 캐스팅
+      4) gross_item_amount = item_price + freight_value 파생 컬럼 추가
+      5) raw의 shipping_limit_date, order_approved_at 등 분석 불필요 컬럼은 제외
+
       Grain: 주문 아이템 1행 (order_id + order_item_id).
     columns:
       - name: order_line_id
@@ -41,7 +53,19 @@ models:
         description: "아이템 총액 (item_price + freight_value)"
 
   - name: stg_customers
-    description: "고객 마스터 스테이징 모델. Grain: customer_id 1행."
+    description: >
+      **Raw → Stg 변환 근거**
+
+      Raw olist_customers에는 customer_id(주문별 발급)와 customer_unique_id(실제 고객) 2개 키가 있습니다.
+      Olist 시스템은 같은 사람이 주문할 때마다 새 customer_id를 부여하지만,
+      customer_unique_id는 동일합니다. 이 구조를 살려 dim_customer 차원의 기초로 사용합니다.
+
+      변환 내용:
+      1) customer_zip_code_prefix를 varchar로 캐스팅 (숫자로 잘못 인식되는 것 방지)
+      2) 컬럼명은 원천 그대로 유지 — 추가 리네이밍 불필요
+      3) 원천 1행 = 1 customer_id이므로 grain 변경 없음
+
+      Grain: customer_id 1행.
     columns:
       - name: customer_id
         description: 고객 PK (주문별 고유)
@@ -61,7 +85,17 @@ models:
 
   - name: stg_products
     description: >
-      상품 마스터 + 영문 카테고리 조인 스테이징 모델.
+      **Raw → Stg 변환 근거**
+
+      Raw에는 olist_products(상품 속성)과 product_category_name_translation(포르투갈어→영문 변환)이
+      별도 테이블로 존재합니다. 분석 시 영문 카테고리명이 필수이므로 staging에서 left join합니다.
+
+      변환 내용:
+      1) olist_products + product_category_name_translation을 category_name으로 left join
+         (매핑이 없는 카테고리도 상품을 잃지 않도록 left join)
+      2) product_name_lenght → product_name_length 등 원천의 오타(lenght) 교정
+      3) 무게·크기 컬럼을 integer로 캐스팅
+
       Grain: product_id 1행.
     columns:
       - name: product_id
@@ -93,7 +127,17 @@ models:
         description: 상품 너비 (cm)
 
   - name: stg_sellers
-    description: "판매자 마스터 스테이징 모델. Grain: seller_id 1행."
+    description: >
+      **Raw → Stg 변환 근거**
+
+      Raw olist_sellers는 판매자별 위치(도시, 주, 우편번호) 정보를 가진 마스터 테이블입니다.
+      dim_seller 차원의 기초로 사용하며, 별도 조인 없이 타입만 정리합니다.
+
+      변환 내용:
+      1) seller_zip_code_prefix를 varchar로 캐스팅
+      2) 원천 grain(seller_id 1행) 유지, 불필요 컬럼 없음
+
+      Grain: seller_id 1행.
     columns:
       - name: seller_id
         description: 판매자 PK
@@ -108,7 +152,19 @@ models:
         description: 판매자 주(州) 코드
 
   - name: stg_payments
-    description: "주문별 결제 내역 스테이징 모델. Grain: order_id + payment_sequential."
+    description: >
+      **Raw → Stg 변환 근거**
+
+      Raw olist_order_payments는 한 주문에 여러 결제수단(카드+볼레토 등)이 가능한 구조입니다.
+      intermediate에서 주결제수단을 선정하고, 주문별 결제 합계를 계산하는 기초로 사용됩니다.
+      또한 dim_payment_type 차원은 이 모델에서 distinct payment_type을 추출하여 생성합니다.
+
+      변환 내용:
+      1) payment_sequential, payment_installments를 integer, payment_value를 double로 캐스팅
+      2) 원천 grain(order_id + payment_sequential) 유지
+      3) accepted_values 테스트로 결제수단 코드 유효성 보장
+
+      Grain: order_id + payment_sequential.
     columns:
       - name: order_id
         description: 주문 ID (olist_orders FK)
@@ -133,7 +189,19 @@ models:
               inclusive: true
 
   - name: stg_reviews
-    description: "주문 리뷰 스테이징 모델. Grain: review_id."
+    description: >
+      **Raw → Stg 변환 근거**
+
+      Raw olist_order_reviews에는 review_comment_title, review_comment_message 등
+      텍스트 컬럼이 있으나, 이 프로젝트에서는 정량 분석(평균 리뷰 점수)만 활용합니다.
+      intermediate에서 주문별 avg(review_score)로 집계되어 fct_orders에 포함됩니다.
+
+      변환 내용:
+      1) review_score를 integer, review_creation_date를 date, review_answer_timestamp를 timestamp로 캐스팅
+      2) 분석에 불필요한 코멘트 텍스트 컬럼 제외
+      3) accepted_range(1~5)로 점수 범위 보장
+
+      Grain: review_id.
     columns:
       - name: review_id
         description: 리뷰 PK
