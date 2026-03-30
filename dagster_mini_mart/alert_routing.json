@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "mode": "log",
+  "routes": {
+    "data_delay": {
+      "jobs": ["dbt_source_freshness_job"],
+      "target": "TBD_DATA_DELAY_CHANNEL"
+    },
+    "transform_error": {
+      "jobs": ["dbt_build_job", "dbt_test_modified_job"],
+      "target": "TBD_TRANSFORM_ERROR_CHANNEL"
+    }
+  },
+  "message_schema": {
+    "common": ["job_name", "run_id", "status", "timestamp", "dagster_run_url"],
+    "data_delay": ["source_name", "max_loaded_at", "warn_after", "error_after"],
+    "transform_error": ["failed_node", "error_type", "error_summary"]
+  }
+}

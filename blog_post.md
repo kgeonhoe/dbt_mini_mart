@@ -1,6 +1,6 @@
-# dbt + DuckDB + Dagster로 로컬 스타스키마 데이터 마트 구축하기
+# dlt + dbt + DuckDB + Dagster로 로컬 스타스키마 데이터 마트 구축하기
 
-> Olist e-커머스 공개 데이터셋을 활용하여 4계층 dbt 모델링 → 스타스키마 → Dagster 오케스트레이션까지 구현한 과정을 정리합니다.
+> Olist e-커머스 공개 데이터셋을 활용하여 dlt 기반 데이터 적재 → 4계층 dbt 모델링 → 스타스키마 → Dagster 오케스트레이션 → Streamlit 대시보드까지 End-to-End 파이프라인을 구현한 과정을 정리합니다.
 
 ---
 
@@ -17,6 +17,8 @@
    - [Gold Layer — 스타스키마](#4-5-gold-layer--스타스키마)
    - [테스트와 문서화](#4-6-테스트와-문서화)
    - [Dagster 오케스트레이션](#4-7-dagster-오케스트레이션)
+   - [dlt — 선언적 데이터 적재](#4-8-dlt--선언적-데이터-적재)
+   - [Streamlit 대시보드](#4-9-streamlit-대시보드)
 5. [회고 및 배운 점](#5-회고-및-배운-점)
 
 ---
@@ -24,8 +26,6 @@
 ## 1. 프로젝트 소개
 
 **dbt_mini_mart**는 Kaggle의 [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) 데이터를 활용한 학습용 데이터 마트 프로젝트입니다.
-
-### 무엇을 만들었나?
 
 - 8개 원천 CSV 테이블 → **14개 dbt 모델** → 최종 **스타스키마(Star Schema)** 데이터 마트
 - 5개 차원 테이블(dim) + 2개 팩트 테이블(fct)
@@ -58,16 +58,14 @@ Olist 데이터셋은 브라질 e-커머스 주문 데이터로, 아래 8개 테
 | **DuckDB** | 로컬 OLAP 웨어하우스 | 1.0+ |
 | **Dagster** | 파이프라인 오케스트레이션 | 1.12+ |
 | **uv** | Python 의존성 관리 | - |
+| **dlt** | 선언적 데이터 적재 (EL) | 1.24+ |
+| **Streamlit** | 대시보드 시각화 | 1.55+ |
+| **Plotly** | 인터랙티브 차트 | 6.6+ |
 | **dbt_utils** | 유틸리티 매크로/테스트 패키지 | 1.1+ |
 
-### 왜 DuckDB인가?
+ 이번 프로젝트에서는 EL(dlt) + T(dbt) + Orchestration(Dagster) + Visualization(Streamlit)으로 이어지는 Modern Data Stack을 로컬 환경에서 구현하는 데 초점을 맞추었습니다.
 
-클라우드 웨어하우스(Snowflake, BigQuery) 없이도 로컬에서 OLAP 성능을 체험할 수 있습니다.
-
-- **제로 인프라**: 파일 하나(`mini_mart.duckdb`)가 곧 데이터베이스
-- **빠른 반복**: 서버 기동 없이 즉시 쿼리 실행
-- **dbt 호환**: `dbt-duckdb` 어댑터로 dbt의 모든 기능 사용 가능
-
+DBT duckdb 연결 설정
 ```yaml
 # profiles.yml
 mini_mart:
@@ -79,9 +77,11 @@ mini_mart:
       threads: 4
 ```
 
-### 왜 dbt seed 대신 Python 스크립트 적재인가?
+### DBT SEED 사용하지 않은 이유
 
 dbt seed는 소규모 참조 데이터에는 적합하지만, 수만~수십만 행의 원천 데이터를 매번 seed로 올리기엔 비효율적입니다.
+
+-  현업에서는 소규모의 dim 테이블을 제외하고는 dbt seed를 사용할일이 없음.
 
 이 프로젝트에서는 **Python 스크립트로 CSV를 DuckDB에 벌크 로드**하고, dbt에서는 `source()`로 참조하는 방식을 채택했습니다:
 
@@ -98,10 +98,11 @@ con.execute("""
 
 ### 왜 Dagster인가?
 
-Airflow 대비 Dagster를 선택한 이유:
+Airflow 대비 Dagster를 선택한 이유는 다음과 같습니다:
 
 - **Asset 중심 패러다임**: dbt 모델이 곧 Dagster Asset으로 자동 매핑
 - **dagster-dbt 통합**: manifest 기반으로 DAG를 자동 생성 — 별도 오퍼레이터 작성 불필요
+- **Asset Catalog에 dbt 메타데이터 노출**: schema.yml에 작성한 모델 설명, 컬럼 정보, SQL, 테스트 현황이 Dagster UI에서 바로 확인 가능. Airflow에서는 dbt가 단순 태스크로 실행되므로, 이런 메타데이터를 오케스트레이터에서 조회할 수 없음
 - **로컬 개발 친화**: `dagster dev` 한 줄로 웹 UI + 실행 환경 기동
 
 ---
@@ -110,40 +111,75 @@ Airflow 대비 Dagster를 선택한 이유:
 
 ### 4계층 모델링 (Layered Architecture)
 
-```
-┌─────────────────────────────────────────────────────┐
-│                    Gold Layer                        │
-│  ┌──────────┐ ┌──────────┐ ┌───────────────────┐   │
-│  │dim_customer│dim_product│ │ dim_payment_type  │   │
-│  └──────────┘ └──────────┘ └───────────────────┘   │
-│  ┌──────────┐ ┌──────────┐                          │
-│  │dim_seller │ │ dim_date │                          │
-│  └──────────┘ └──────────┘                          │
-│  ┌───────────────────────┐ ┌──────────────────┐     │
-│  │      fct_orders       │ │ fct_daily_sales  │     │
-│  └───────────────────────┘ └──────────────────┘     │
-├─────────────────────────────────────────────────────┤
-│               Intermediate Layer                     │
-│  ┌───────────────────────────────────────────┐      │
-│  │          int_orders_enriched              │      │
-│  └───────────────────────────────────────────┘      │
-├─────────────────────────────────────────────────────┤
-│                 Staging Layer                        │
-│  stg_orders · stg_customers · stg_payments          │
-│  stg_products · stg_reviews · stg_sellers           │
-├─────────────────────────────────────────────────────┤
-│                   Raw Layer                          │
-│  olist_orders · olist_order_items · olist_customers  │
-│  olist_products · olist_sellers · olist_payments     │
-│  olist_order_reviews · product_category_translation  │
-└─────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph Raw_Layer[Raw Layer]
+    raw_orders[olist_orders]
+    raw_items[olist_order_items]
+    raw_payments[olist_order_payments]
+    raw_reviews[olist_order_reviews]
+    raw_customers[olist_customers]
+    raw_products[olist_products]
+    raw_sellers[olist_sellers]
+    raw_trans[product_category_name_translation]
+  end
+
+  subgraph Staging_Layer[Staging Layer]
+    stg_orders[stg_orders]
+    stg_customers[stg_customers]
+    stg_payments[stg_payments]
+    stg_products[stg_products]
+    stg_reviews[stg_reviews]
+    stg_sellers[stg_sellers]
+  end
+
+  subgraph Intermediate_Layer[Intermediate Layer]
+    int_orders[int_orders_enriched]
+  end
+
+  subgraph Gold_Layer[Gold Layer]
+    dim_customer[dim_customer]
+    dim_product[dim_product]
+    dim_payment[dim_payment_type]
+    dim_seller[dim_seller]
+    dim_date[dim_date]
+    fct_orders[fct_orders]
+    fct_daily[fct_daily_sales]
+  end
+
+  raw_orders --> stg_orders
+  raw_items --> stg_orders
+  raw_customers --> stg_customers
+  raw_payments --> stg_payments
+  raw_products --> stg_products
+  raw_trans --> stg_products
+  raw_reviews --> stg_reviews
+  raw_sellers --> stg_sellers
+
+  stg_orders --> int_orders
+  stg_payments --> int_orders
+  stg_reviews --> int_orders
+
+  stg_customers --> dim_customer
+  stg_products --> dim_product
+  stg_payments --> dim_payment
+  stg_sellers --> dim_seller
+
+  int_orders --> fct_orders
+  dim_date --> fct_orders
+  dim_customer --> fct_orders
+  dim_product --> fct_orders
+  dim_payment --> fct_orders
+  dim_seller --> fct_orders
+
+  fct_orders --> fct_daily
 ```
 
 **각 계층의 역할:**
 
 | 계층 | Materialization | 역할 |
 |------|----------------|------|
-| **Raw** | 테이블 (Python 적재) | CSV → DuckDB 벌크 로드. `_loaded_at` 자동 추가 |
+| **Raw** | 테이블 (dlt 적재) | dlt 파이프라인으로 CSV → DuckDB 벌크 로드. `_loaded_at` 자동 추가 |
 | **Staging** | 뷰 (view) | 타입 캐스팅, 컬럼 리네이밍, 단순 조인 |
 | **Intermediate** | 뷰 (view) | 여러 staging 모델 결합, 비즈니스 로직 적용 |
 | **Gold** | 테이블 (table) | 최종 분석용 스타스키마 (dim + fct) |
@@ -601,6 +637,8 @@ dbt docs block으로 비즈니스 컨텍스트를 코드 옆에 유지합니다:
 {% enddocs %}
 ```
 
+![alt text](image.png)
+
 ```bash
 dbt docs generate && dbt docs serve
 ```
@@ -610,6 +648,8 @@ dbt docs generate && dbt docs serve
 ### 4-7. Dagster 오케스트레이션
 
 dbt 모델을 Dagster Asset으로 자동 매핑하여, 웹 UI에서 DAG를 시각화하고 실행할 수 있습니다.
+
+![alt text](image-1.png)
 
 #### 프로젝트 설정
 
@@ -638,23 +678,228 @@ def dbt_mini_mart_dbt_assets(context: AssetExecutionContext, dbt: DbtCliResource
 
 `@dbt_assets` 데코레이터가 dbt manifest를 읽어서, **14개 dbt 모델 + 8개 source = 22개 Dagster Asset**을 자동 생성합니다. `dbt build`는 모델 빌드와 테스트를 DAG 순서대로 실행합니다.
 
+#### Asset Catalog — dbt 메타데이터가 Dagster UI에 노출되는 구조
+
+`@dbt_assets(manifest=...)`가 manifest를 파싱할 때, dbt schema.yml에 작성한 description·컬럼 정보·테스트 목록·Raw SQL까지 함께 읽어서 Dagster Asset의 메타데이터로 등록합니다.
+
+이 덕분에 Dagster UI의 Asset Catalog에서:
+
+- 모델별 **Description** (docs block 포함)
+- **Raw SQL** 원문
+- 컬럼별 설명과 **Generic Data Tests** 적용 현황
+
+을 코드 저장소를 열지 않고도 바로 확인할 수 있습니다.
+![alt text](image-2.png)
+
+
+Airflow에서는 dbt가 `BashOperator`나 Cosmos를 통해 "태스크"로 실행될 뿐이고, 모델 단위의 설명·SQL·테스트 메타데이터가 Airflow UI에 노출되지 않습니다. 이 차이가 dbt 프로젝트에서 Dagster를 선택하게 된 가장 실용적인 이유 중 하나였습니다.
+
 #### Definitions
 
 ```python
 # dagster_mini_mart/definitions.py
 defs = Definitions(
-    assets=[dbt_mini_mart_dbt_assets],
+    assets=[dlt_raw_ingest, dbt_mini_mart_dbt_assets],
+    jobs=[dbt_build_job, dbt_source_freshness_job, dbt_test_modified_job],
+    sensors=[routed_failure_sensor],
     resources={
         "dbt": DbtCliResource(project_dir=dbt_project),
     },
 )
 ```
 
+dlt 적재 asset(`dlt_raw_ingest`)과 dbt 모델 asset이 하나의 Definitions에 등록되어, Dagster UI에서 **ingestion → transform → gold** 전체 리니지를 한눈에 확인할 수 있습니다.
+
 #### 실행
 
 ```bash
 dagster dev
 # → http://localhost:3000 에서 Asset DAG 확인 및 실행
+```
+
+---
+
+### 4-8. dlt — 선언적 데이터 적재
+
+기존 `load_raw_to_duckdb.py`는 순수 Python + DuckDB SQL로 CSV를 적재하는 방식이었습니다. 이를 **dlt(data load tool)**로 교체하여 선언적 EL(Extract-Load) 파이프라인을 구축했습니다.
+
+#### 왜 dlt인가?
+
+| 관점 | Python 스크립트 | dlt |
+|------|----------------|-----|
+| 스키마 관리 | 수동 (`CREATE TABLE`) | 자동 추론 + 진화 |
+| 메타데이터 | 없음 | `_dlt_load_id`, `_dlt_id` 자동 추가 |
+| 로드 전략 | 직접 구현 | `write_disposition` 선언 (`replace`, `append`, `merge`) |
+| Dagster 통합 | op/job으로 감싸야 함 | multi-asset으로 자연스럽게 매핑 |
+| 확장성 | 새 소스 추가 시 SQL 작성 | `@dlt.resource` 추가만으로 확장 |
+
+#### dlt 파이프라인 구현
+
+```python
+# scripts/load_raw_dlt.py (핵심 부분)
+
+@dlt.source(name="olist_raw")
+def olist_raw_source(source_dir: Path):
+    loaded_at = datetime.now(timezone.utc).isoformat()
+
+    for table in RAW_TABLES:
+        csv_path = _resolve_csv_path(table, source_dir)
+
+        @dlt.resource(name=table, write_disposition="replace", primary_key=None)
+        def _load_table(path: Path = csv_path, ts: str = loaded_at):
+            rows = _read_csv_rows(path)
+            for row in rows:
+                row["_loaded_at"] = ts    # dbt source freshness 연동
+                yield row
+
+        yield _load_table
+
+pipeline = dlt.pipeline(
+    pipeline_name="olist_raw_load",
+    destination=dlt.destinations.duckdb(str(DB_PATH)),
+    dataset_name="raw",
+)
+load_info = pipeline.run(olist_raw_source(source_dir=source_dir))
+```
+
+**설계 포인트:**
+
+1. **`@dlt.source` + `@dlt.resource`**: 8개 CSV 테이블을 선언적으로 정의. 새 테이블 추가 시 `RAW_TABLES` 리스트에 한 줄만 추가하면 됨
+2. **`write_disposition="replace"`**: 매번 전체 교체. 원천 데이터 변경이 적은 배치 파이프라인에 적합
+3. **`_loaded_at` 수동 추가**: dbt source freshness와의 호환성을 위해 UTC 타임스탬프를 명시적으로 삽입
+4. **dlt 자동 메타데이터**: `_dlt_load_id`(로드 배치 추적), `_dlt_id`(행 고유 ID)가 자동 생성되어 데이터 리니지 추적에 활용 가능
+
+#### Dagster multi-asset으로 통합
+
+dlt 파이프라인을 Dagster `@multi_asset`으로 래핑하여, 8개 raw 테이블이 Dagster UI에서 개별 asset으로 나타나도록 구현했습니다.
+
+```python
+# dagster_mini_mart/dlt_assets.py (핵심 부분)
+
+_outs = {
+    table: AssetOut(key=["raw", table], group_name="ingestion", is_required=False)
+    for table in RAW_TABLES
+}
+
+@multi_asset(name="dlt_raw_ingest", outs=_outs, compute_kind="dlt", can_subset=True)
+def dlt_raw_ingest(context):
+    _drop_raw_tables()                          # 기존 테이블 정리
+    pipeline = dlt.pipeline(...)
+    load_info = pipeline.run(_olist_raw_source())
+
+    selected = context.selected_output_names    # subset 실행 지원
+    for table in RAW_TABLES:
+        if table not in selected:
+            continue
+        count = _row_count(table)
+        yield MaterializeResult(
+            asset_key=["raw", table],
+            metadata={"row_count": MetadataValue.int(count)},
+        )
+```
+
+이 통합으로 Dagster UI에서 다음과 같은 End-to-End 리니지가 가능합니다:
+
+```
+[dlt] raw/olist_orders     →  [dbt] stg_orders     →  int_orders_enriched  →  fct_orders
+[dlt] raw/olist_customers  →  [dbt] stg_customers   →                         dim_customer
+[dlt] raw/olist_products   →  [dbt] stg_products    →                         dim_product
+...                                                                            fct_daily_sales
+```
+
+#### 트러블슈팅
+
+dlt + Dagster 통합 과정에서 발생한 주요 이슈들을 기록해 두었습니다 (`docs/dlt_dagster_troubleshooting.md`):
+
+| 이슈 | 원인 | 해결 |
+|------|------|------|
+| DuckDB NOT NULL 컬럼 추가 불가 | dlt 메타데이터 컬럼(`_dlt_id` 등)을 기존 테이블에 ALTER 시도 | 파이프라인 실행 전 기존 테이블 DROP |
+| `dev_mode=True` 스키마명 변경 | dataset에 타임스탬프 suffix 추가됨 | `dev_mode` 제거로 스키마명 고정 |
+| Dagster context type hint 거부 | Dagster 1.12에서 multi_asset의 type annotation 호환성 | annotation 제거 |
+| subset materialize 시 asset key 미스매치 | 선택되지 않은 asset에도 MaterializeResult yield | `context.selected_output_names` 필터 추가 |
+
+---
+
+### 4-9. Streamlit 대시보드
+
+dbt gold 레이어의 데이터를 **Streamlit + Plotly**로 시각화하여, 분석 결과를 대시보드로 제공합니다.
+
+#### 아키텍처
+
+```
+DuckDB (main_gold schema)
+    │
+    ├── fct_orders          ─┐
+    ├── fct_daily_sales      │
+    ├── dim_customer         ├──→  Streamlit App  ──→  http://localhost:8501
+    ├── dim_product          │
+    ├── dim_payment_type    ─┘
+    └── dim_seller
+```
+
+Streamlit은 DuckDB에 **read-only로 직접 연결**합니다. 별도의 중간 데이터 저장소나 API 서버 없이 gold 테이블을 바로 쿼리합니다.
+
+#### 대시보드 구성
+
+**KPI 카드** (상단):
+
+| 지표 | 소스 |
+|------|------|
+| 주문 수 | `count(DISTINCT order_id)` from fct_orders |
+| 주문 아이템 수 | `count(*)` from fct_orders |
+| 총 매출 | `sum(gross_item_amount)` from fct_orders |
+| 평균 리뷰 점수 | `avg(avg_review_score)` from fct_orders |
+
+**차트 4개** (DE Zoomcamp 기준 2개 이상 필요):
+
+| # | 차트 | 타입 | 데이터 소스 |
+|---|------|------|-------------|
+| 1 | 📈 일별 매출 추이 | Area (temporal) | `fct_daily_sales` — date_key별 gross_sales 합계 |
+| 2 | 💳 결제수단별 주문 비율 | Donut (categorical) | `fct_orders` × `dim_payment_type` |
+| 3 | 🏷️ 카테고리별 매출 TOP 10 | Bar (horizontal) | `fct_orders` × `dim_product` |
+| 4 | 🗺️ 고객 주(州)별 분포 | Bar (colored) | `fct_orders` × `dim_customer` |
+
+#### 핵심 구현
+
+```python
+# streamlit_app.py (핵심 부분)
+
+@st.cache_resource
+def get_connection():
+    return duckdb.connect(str(DB_PATH), read_only=True)
+
+def query(sql: str):
+    return get_connection().execute(sql).fetchdf()
+
+# 일별 매출 추이
+daily = query("""
+    SELECT date_key, sum(gross_sales) AS gross_sales, sum(order_count) AS order_count
+    FROM main_gold.fct_daily_sales
+    GROUP BY date_key ORDER BY date_key
+""")
+fig = px.area(daily, x="date_key", y="gross_sales")
+
+# 결제수단 분포
+payment = query("""
+    SELECT p.payment_type_label, count(*) AS cnt
+    FROM main_gold.fct_orders f
+    JOIN main_gold.dim_payment_type p ON f.payment_type = p.payment_type
+    GROUP BY 1 ORDER BY 2 DESC
+""")
+fig = px.pie(payment, names="payment_type_label", values="cnt", hole=0.4)
+```
+
+**설계 포인트:**
+
+1. **`@st.cache_resource`로 DB 커넥션 캐싱** — 페이지 리렌더링마다 새 연결을 맺지 않음
+2. **gold 테이블 직접 쿼리** — dbt가 이미 정제·집계한 데이터를 가져오므로, 대시보드 코드에 비즈니스 로직이 없음
+3. **Plotly 인터랙티브 차트** — 줌, 필터, 호버 기능이 기본 제공
+
+#### 실행
+
+```bash
+uv run streamlit run streamlit_app.py
+# → http://localhost:8501 에서 대시보드 확인
 ```
 
 ---
@@ -666,17 +911,22 @@ dagster dev
 - **Grain을 먼저 정의하니 모든 설계가 따라왔다.** order_line_id를 PK로 잡은 결정이 이후 모든 조인과 집계의 기준이 됐습니다.
 - **매크로로 로직을 중앙 관리하니 일관성이 유지됐다.** `date_range_start/end`를 dim_date와 테스트에서 동시에 참조하니, 범위 불일치 버그가 원천 차단됩니다.
 - **DuckDB로 빠르게 반복 개발할 수 있었다.** 클라우드 비용 없이 수만 행의 데이터를 로컬에서 즉시 테스트할 수 있었습니다.
+- **dlt로 적재 코드를 선언적으로 전환했다.** 수동 SQL DDL 대신 `@dlt.resource`로 8개 테이블을 정의하니, 새 소스 추가가 한 줄로 끝납니다. `_dlt_load_id` 등 자동 메타데이터 덕분에 데이터 리니지 추적도 수월해졌습니다.
+- **Streamlit으로 gold 레이어를 즉시 시각화할 수 있었다.** DuckDB read-only 연결으로 gold 테이블을 직접 쿼리하니, 별도 API 없이도 대시보드를 빠르게 구축할 수 있었습니다.
 
 ### 어려웠던 점
 
 - **결제 데이터의 1:N 관계 처리**: 한 주문에 여러 결제수단이 사용될 수 있어, `primary_payment_type`을 선정하는 로직이 필요했습니다.
 - **Staging에서 비즈니스 로직의 경계 설정**: "언제까지가 정제이고 언제부터 비즈니스 로직인가"의 판단이 중요했습니다. 이 프로젝트에서는 "두 테이블 이상의 정보를 결합하는 순간"을 Intermediate로 분리하는 기준을 적용했습니다.
+- **dlt + Dagster 통합 시 호환성 이슈**: Dagster 1.12에서 `@multi_asset`의 context type hint 거부, DuckDB의 NOT NULL 컬럼 ADD 제약, subset materialize 시 asset key 미스매치 등 다양한 이슈가 발생했습니다. 트러블슈팅 과정을 별도 문서로 기록했습니다.
 
 ### 개선 가능한 부분
 
 - Incremental 모델 적용 (대용량 시나리오)
 - dbt Metrics / Semantic Layer 도입
 - CI/CD에서 `dbt build` + `dagster asset materialize` 자동화
+- Streamlit Cloud 배포 또는 Docker 컨테이너화
+- dlt의 `merge` write_disposition 활용 (change data capture 시나리오)
 
 ---
 

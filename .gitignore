@@ -4,3 +4,13 @@ dbt_packages/
 logs/
 *.duckdb
 *.log
+
+# Dagster temp
+.tmp_dagster_home_*/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
