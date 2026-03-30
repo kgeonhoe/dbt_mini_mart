@@ -1,6 +1,6 @@
-# Building a Local Star Schema Data Mart with dbt + DuckDB + Dagster
+# Building a Local Star Schema Data Mart with dbt + DuckDB + Dagster + dlt
 
-> Using the Olist e-commerce public dataset to implement a 4-layer dbt modeling pipeline → star schema → Dagster orchestration.
+> End-to-End Modern Data Stack: dlt ingestion → dbt modeling → Dagster orchestration → Streamlit dashboard, built on a local DuckDB warehouse.
 
 ---
 
@@ -17,6 +17,8 @@
    - [Gold Layer — Star Schema](#4-5-gold-layer--star-schema)
    - [Testing and Documentation](#4-6-testing-and-documentation)
    - [Dagster Orchestration](#4-7-dagster-orchestration)
+   - [dlt — Declarative Data Ingestion](#4-8-dlt--declarative-data-ingestion)
+   - [Streamlit Dashboard](#4-9-streamlit-dashboard)
 5. [Retrospective](#5-retrospective)
 
 ---
@@ -55,10 +57,13 @@ The Olist dataset consists of Brazilian e-commerce order data across 8 tables:
 | **dbt-core** | SQL modeling, testing, documentation | 1.8+ |
 | **DuckDB** | Local OLAP warehouse | 1.0+ |
 | **Dagster** | Pipeline orchestration | 1.12+ |
+| **dlt** | Declarative data ingestion (EL) | 1.24+ |
+| **Streamlit** | Dashboard / visualization | 1.55+ |
+| **Plotly** | Interactive charts | 6.6+ |
 | **uv** | Python dependency management | - |
 | **dbt_utils** | Utility macros/test package | 1.1+ |
 
-This project focuses on data warehouse design through dbt, so a lightweight local database was chosen.
+This project covers the full Modern Data Stack lifecycle — ingestion through visualization — using a lightweight local database.
 
 dbt-DuckDB connection setup:
 ```yaml
@@ -174,7 +179,7 @@ flowchart TB
 
 | Layer | Materialization | Role |
 |-------|----------------|------|
-| **Raw** | Table (Python load) | CSV → DuckDB bulk load. Auto-adds `_loaded_at` |
+| **Raw** | Table (dlt load) | CSV → DuckDB bulk load via dlt. Auto-adds `_loaded_at` |
 | **Staging** | View | Type casting, column renaming, simple joins |
 | **Intermediate** | View | Combines multiple staging models, applies business logic |
 | **Gold** | Table | Final star schema for analytics (dim + fct) |
@@ -688,18 +693,207 @@ In Airflow, dbt runs as a task through `BashOperator` or Cosmos, and model-level
 ```python
 # dagster_mini_mart/definitions.py
 defs = Definitions(
-    assets=[dbt_mini_mart_dbt_assets],
+    assets=[dlt_raw_ingest, dbt_mini_mart_dbt_assets],
+    jobs=[dbt_build_job, dbt_source_freshness_job, dbt_test_modified_job],
+    sensors=[routed_failure_sensor],
     resources={
         "dbt": DbtCliResource(project_dir=dbt_project),
     },
 )
 ```
 
+The dlt ingestion asset (`dlt_raw_ingest`) and dbt model assets are registered in a single Definitions, enabling end-to-end **ingestion → transform → gold** lineage visibility in the Dagster UI.
+
 #### Execution
 
 ```bash
 dagster dev
 # → http://localhost:3000 to view and run the Asset DAG
+```
+
+---
+
+### 4-8. dlt — Declarative Data Ingestion
+
+The original `load_raw_to_duckdb.py` used plain Python + DuckDB SQL to load CSVs. This was replaced with **dlt (data load tool)** to build a declarative EL (Extract-Load) pipeline.
+
+#### Why dlt?
+
+| Aspect | Python Script | dlt |
+|--------|--------------|-----|
+| Schema management | Manual (`CREATE TABLE`) | Auto-inferred + evolution |
+| Metadata | None | `_dlt_load_id`, `_dlt_id` auto-added |
+| Load strategy | Manual implementation | Declarative `write_disposition` (`replace`, `append`, `merge`) |
+| Dagster integration | Wrap in op/job | Natural mapping to multi-asset |
+| Extensibility | Write SQL for each new source | Just add a `@dlt.resource` |
+
+#### dlt Pipeline Implementation
+
+```python
+# scripts/load_raw_dlt.py (core)
+
+@dlt.source(name="olist_raw")
+def olist_raw_source(source_dir: Path):
+    loaded_at = datetime.now(timezone.utc).isoformat()
+
+    for table in RAW_TABLES:
+        csv_path = _resolve_csv_path(table, source_dir)
+
+        @dlt.resource(name=table, write_disposition="replace", primary_key=None)
+        def _load_table(path: Path = csv_path, ts: str = loaded_at):
+            rows = _read_csv_rows(path)
+            for row in rows:
+                row["_loaded_at"] = ts    # dbt source freshness integration
+                yield row
+
+        yield _load_table
+
+pipeline = dlt.pipeline(
+    pipeline_name="olist_raw_load",
+    destination=dlt.destinations.duckdb(str(DB_PATH)),
+    dataset_name="raw",
+)
+load_info = pipeline.run(olist_raw_source(source_dir=source_dir))
+```
+
+**Design points:**
+
+1. **`@dlt.source` + `@dlt.resource`**: 8 CSV tables defined declaratively. Adding a new table means just one line in `RAW_TABLES`
+2. **`write_disposition="replace"`**: Full replace on each run — suitable for batch pipelines with infrequent source changes
+3. **Manual `_loaded_at`**: Explicit UTC timestamp for dbt source freshness compatibility
+4. **dlt auto-metadata**: `_dlt_load_id` (load batch tracking) and `_dlt_id` (row unique ID) are auto-generated for data lineage
+
+#### Dagster Multi-Asset Integration
+
+The dlt pipeline is wrapped as a Dagster `@multi_asset`, making each of the 8 raw tables appear as individual assets in the Dagster UI.
+
+```python
+# dagster_mini_mart/dlt_assets.py (core)
+
+_outs = {
+    table: AssetOut(key=["raw", table], group_name="ingestion", is_required=False)
+    for table in RAW_TABLES
+}
+
+@multi_asset(name="dlt_raw_ingest", outs=_outs, compute_kind="dlt", can_subset=True)
+def dlt_raw_ingest(context):
+    _drop_raw_tables()                          # Clean existing tables
+    pipeline = dlt.pipeline(...)
+    load_info = pipeline.run(_olist_raw_source())
+
+    selected = context.selected_output_names    # Subset execution support
+    for table in RAW_TABLES:
+        if table not in selected:
+            continue
+        count = _row_count(table)
+        yield MaterializeResult(
+            asset_key=["raw", table],
+            metadata={"row_count": MetadataValue.int(count)},
+        )
+```
+
+This integration enables end-to-end lineage in the Dagster UI:
+
+```
+[dlt] raw/olist_orders     →  [dbt] stg_orders     →  int_orders_enriched  →  fct_orders
+[dlt] raw/olist_customers  →  [dbt] stg_customers   →                         dim_customer
+[dlt] raw/olist_products   →  [dbt] stg_products    →                         dim_product
+...                                                                            fct_daily_sales
+```
+
+#### Troubleshooting
+
+Key issues encountered during dlt + Dagster integration (documented in `docs/dlt_dagster_troubleshooting.md`):
+
+| Issue | Cause | Resolution |
+|-------|-------|------------|
+| DuckDB cannot ADD NOT NULL column | dlt metadata columns (`_dlt_id`, etc.) ALTER on existing tables | DROP existing tables before pipeline run |
+| `dev_mode=True` changes schema name | Appends timestamp suffix to dataset name | Remove `dev_mode` to fix schema name |
+| Dagster context type hint rejected | Dagster 1.12 multi_asset type annotation incompatibility | Remove type annotation |
+| Subset materialize asset key mismatch | MaterializeResult yielded for non-selected assets | Filter with `context.selected_output_names` |
+
+---
+
+### 4-9. Streamlit Dashboard
+
+The dbt gold layer data is visualized with **Streamlit + Plotly**, providing an interactive analytics dashboard.
+
+#### Architecture
+
+```
+DuckDB (main_gold schema)
+    │
+    ├── fct_orders          ─┐
+    ├── fct_daily_sales      │
+    ├── dim_customer         ├──→  Streamlit App  ──→  http://localhost:8501
+    ├── dim_product          │
+    ├── dim_payment_type    ─┘
+    └── dim_seller
+```
+
+Streamlit connects **directly to DuckDB in read-only mode**. No intermediate data store or API server — gold tables are queried directly.
+
+#### Dashboard Layout
+
+**KPI Cards** (top row):
+
+| Metric | Source |
+|--------|--------|
+| Order Count | `count(DISTINCT order_id)` from fct_orders |
+| Order Items | `count(*)` from fct_orders |
+| Total Revenue | `sum(gross_item_amount)` from fct_orders |
+| Avg Review Score | `avg(avg_review_score)` from fct_orders |
+
+**4 Charts** (DE Zoomcamp requires 2+):
+
+| # | Chart | Type | Data Source |
+|---|-------|------|-------------|
+| 1 | 📈 Daily Sales Trend | Area (temporal) | `fct_daily_sales` — gross_sales by date_key |
+| 2 | 💳 Payment Method Distribution | Donut (categorical) | `fct_orders` × `dim_payment_type` |
+| 3 | 🏷️ Top 10 Categories by Revenue | Bar (horizontal) | `fct_orders` × `dim_product` |
+| 4 | 🗺️ Customer Distribution by State | Bar (colored) | `fct_orders` × `dim_customer` |
+
+#### Core Implementation
+
+```python
+# streamlit_app.py (core)
+
+@st.cache_resource
+def get_connection():
+    return duckdb.connect(str(DB_PATH), read_only=True)
+
+def query(sql: str):
+    return get_connection().execute(sql).fetchdf()
+
+# Daily sales trend
+daily = query("""
+    SELECT date_key, sum(gross_sales) AS gross_sales, sum(order_count) AS order_count
+    FROM main_gold.fct_daily_sales
+    GROUP BY date_key ORDER BY date_key
+""")
+fig = px.area(daily, x="date_key", y="gross_sales")
+
+# Payment method distribution
+payment = query("""
+    SELECT p.payment_type_label, count(*) AS cnt
+    FROM main_gold.fct_orders f
+    JOIN main_gold.dim_payment_type p ON f.payment_type = p.payment_type
+    GROUP BY 1 ORDER BY 2 DESC
+""")
+fig = px.pie(payment, names="payment_type_label", values="cnt", hole=0.4)
+```
+
+**Design points:**
+
+1. **`@st.cache_resource` for DB connection caching** — avoids reconnecting on every page rerender
+2. **Direct gold table queries** — dbt already handles cleansing and aggregation, so no business logic in dashboard code
+3. **Plotly interactive charts** — zoom, filter, and hover built-in
+
+#### Execution
+
+```bash
+uv run streamlit run streamlit_app.py
+# → http://localhost:8501 to view the dashboard
 ```
 
 ---
@@ -711,17 +905,22 @@ dagster dev
 - **Defining the grain first drove every downstream decision.** Choosing order_line_id as the PK became the foundation for all joins and aggregations.
 - **Centralizing logic in macros maintained consistency.** Referencing `date_range_start/end` in both dim_date and tests eliminated range mismatch bugs at the source.
 - **DuckDB enabled rapid iteration.** Testing tens of thousands of rows locally with zero cloud cost.
+- **dlt made ingestion declarative.** Replacing manual SQL DDL with `@dlt.resource` for 8 tables means adding a new source is a one-liner. Auto-generated `_dlt_load_id` metadata enables data lineage tracking out of the box.
+- **Streamlit enabled instant gold layer visualization.** A read-only DuckDB connection to gold tables — no API server needed — delivered a working dashboard in minimal code.
 
 ### Challenges
 
 - **Handling the 1:N payment relationship**: An order can use multiple payment methods, requiring `primary_payment_type` selection logic.
 - **Drawing the line between cleansing and business logic in Staging**: The guiding principle was "the moment information from two or more tables is combined, it moves to Intermediate."
+- **dlt + Dagster integration compatibility issues**: Dagster 1.12 rejected `@multi_asset` context type hints, DuckDB couldn't ALTER TABLE ADD NOT NULL columns, and subset materialization caused asset key mismatches. All issues were documented in a troubleshooting guide.
 
 ### Future Improvements
 
 - Incremental model adoption (large-scale scenarios)
 - dbt Metrics / Semantic Layer introduction
 - CI/CD automation for `dbt build` + `dagster asset materialize`
+- Streamlit Cloud deployment or Docker containerization
+- Leverage dlt `merge` write_disposition for change data capture scenarios
 
 ---
 
